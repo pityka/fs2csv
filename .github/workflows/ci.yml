@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: sbt/setup-sbt@v1
+
+      - uses: coursier/cache-action@v6
+
+      - name: Compile
+        run: sbt -J-Xmx3g Test/compile
+
+      - name: Test
+        run: sbt -J-Xmx3g test
