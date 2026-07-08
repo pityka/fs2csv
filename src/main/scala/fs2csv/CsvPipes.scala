@@ -22,6 +22,117 @@ object CsvPipes:
   )(using r: RowReader[A]): Pipe[F, Byte, A] =
     bytesToRows[F, A](opts, headerAware = true, headerForField)
 
+  def encodeWithoutHeaders[F[_], A](
+      opts: CsvParserOptions = CsvParserOptions.default
+  )(using w: RowWriter[A]): Pipe[F, A, Byte] =
+    rowsToBytes[F, A](opts, emitHeader = false, Naming.identity)
+
+  def encodeUsingHeaders[F[_], A](
+      opts: CsvParserOptions = CsvParserOptions.default,
+      headerForField: String => String = Naming.identity
+  )(using w: RowWriter[A]): Pipe[F, A, Byte] =
+    rowsToBytes[F, A](opts, emitHeader = true, headerForField)
+
+  private def rowsToBytes[F[_], A](
+      opts:           CsvParserOptions,
+      emitHeader:     Boolean,
+      headerForField: String => String
+  )(using w: RowWriter[A]): Pipe[F, A, Byte] = { in =>
+    Stream.suspend {
+      val drv = new RowEncodingDriver[A](opts, w)
+      val prefix: Stream[F, Byte] =
+        if (emitHeader) {
+          drv.appendHeader(headerForField)
+          Stream.chunk(drv.drainAsBytes())
+        } else Stream.empty
+      val body: Stream[F, Byte] =
+        in.chunks.flatMap { chunk =>
+          var i = 0
+          while (i < chunk.size) {
+            drv.appendRow(chunk(i))
+            i += 1
+          }
+          Stream.chunk(drv.drainAsBytes())
+        }
+      prefix ++ body
+    }
+  }
+
+  private final class RowEncodingDriver[A](
+      opts:   CsvParserOptions,
+      writer: RowWriter[A]
+  ):
+    private val fs     = opts.fieldSeparator
+    private val qc     = opts.quoteChar
+    private val rs     = opts.recordSeparator
+    private val arity  = writer.arity
+    private val rowSb  = new java.lang.StringBuilder(opts.bufferSize)
+    private val cellSb = new java.lang.StringBuilder(64)
+
+    def appendHeader(headerForField: String => String): Unit = {
+      var i = 0
+      while (i < arity) {
+        if (i > 0) rowSb.append(fs)
+        cellSb.setLength(0)
+        cellSb.append(writer.headerName(i, headerForField))
+        appendCellQuoted(cellSb)
+        i += 1
+      }
+      rowSb.append(rs)
+    }
+
+    def appendRow(a: A): Unit = {
+      var i = 0
+      while (i < arity) {
+        if (i > 0) rowSb.append(fs)
+        cellSb.setLength(0)
+        writer.encodeField(a, i, cellSb)
+        appendCellQuoted(cellSb)
+        i += 1
+      }
+      rowSb.append(rs)
+    }
+
+    def drainAsBytes(): Chunk[Byte] = {
+      val len = rowSb.length
+      if (len == 0) Chunk.empty
+      else {
+        val bytes = new Array[Byte](len)
+        var i = 0
+        while (i < len) {
+          val c = rowSb.charAt(i)
+          bytes(i) = (if (c > 127) '?' else c).toByte
+          i += 1
+        }
+        rowSb.setLength(0)
+        Chunk.array(bytes)
+      }
+    }
+
+    private def appendCellQuoted(cell: java.lang.StringBuilder): Unit = {
+      val len = cell.length
+      var needsQuoting = false
+      var i = 0
+      while (i < len && !needsQuoting) {
+        val c = cell.charAt(i)
+        if (c == fs || c == qc || c == '\r' || c == '\n') needsQuoting = true
+        i += 1
+      }
+      if (!needsQuoting) {
+        rowSb.append(cell)
+      } else {
+        rowSb.append(qc)
+        var j = 0
+        while (j < len) {
+          val c = cell.charAt(j)
+          if (c == qc) { rowSb.append(qc); rowSb.append(qc) }
+          else rowSb.append(c)
+          j += 1
+        }
+        rowSb.append(qc)
+      }
+    }
+
   private def bytesToRows[F[_]: RaiseThrowable, A](
       opts: CsvParserOptions,
       headerAware: Boolean,

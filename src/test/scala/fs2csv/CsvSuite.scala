@@ -262,3 +262,139 @@ class CsvPipesSuite extends CatsEffectSuite {
       .map(n => assertEquals(n, rowCount.toLong))
   }
 }
+
+class CsvEncodeSuite extends FunSuite {
+
+  private def encodeToString[A: RowWriter](
+      rows:        List[A],
+      withHeaders: Boolean = false,
+      opts:        CsvParserOptions = CsvParserOptions.default,
+      naming:      String => String = Naming.identity
+  ): String = {
+    val pipe =
+      if (withHeaders) CsvPipes.encodeUsingHeaders[IO, A](opts, naming)
+      else CsvPipes.encodeWithoutHeaders[IO, A](opts)
+    Stream
+      .emits(rows)
+      .covary[IO]
+      .through(pipe)
+      .compile
+      .to(Array)
+      .map(bs => new String(bs, "US-ASCII"))
+      .unsafeRunSync()
+  }
+
+  case class IdName(id: Int, name: String) derives RowReader, RowWriter
+
+  test("encode without headers: primitive + string") {
+    val out = encodeToString(List(IdName(1, "alice"), IdName(2, "bob")))
+    assertEquals(out, "1,alice\n2,bob\n")
+  }
+
+  test("encode with headers uses field names") {
+    val out = encodeToString(List(IdName(1, "alice")), withHeaders = true)
+    assertEquals(out, "id,name\n1,alice\n")
+  }
+
+  case class Trade(id: Long, sym: String, qty: Int, px: Double, active: Boolean)
+      derives RowWriter
+
+  test("mixed types encode") {
+    val out = encodeToString(List(Trade(1L, "AAPL", 100, 189.42, true)))
+    assertEquals(out, "1,AAPL,100,189.42,true\n")
+  }
+
+  case class Cell(id: Int, note: String) derives RowWriter
+
+  test("quotes cells that contain the field separator") {
+    val out = encodeToString(List(Cell(1, "hello, world")))
+    assertEquals(out, "1,\"hello, world\"\n")
+  }
+
+  test("quotes cells with embedded quotes and doubles them") {
+    val out = encodeToString(List(Cell(1, "with \"quotes\" inside")))
+    assertEquals(out, "1,\"with \"\"quotes\"\" inside\"\n")
+  }
+
+  test("quotes cells containing CR or LF") {
+    val out = encodeToString(List(Cell(1, "line1\nline2")))
+    assertEquals(out, "1,\"line1\nline2\"\n")
+  }
+
+  case class Maybe(id: Int, label: Option[String], n: Option[Long]) derives RowWriter
+
+  test("Option[A]: None → empty cell, Some(v) → value") {
+    val out = encodeToString(
+      List(Maybe(1, Some("foo"), Some(42L)), Maybe(2, None, None), Maybe(3, Some("bar"), Some(7L)))
+    )
+    assertEquals(out, "1,foo,42\n2,,\n3,bar,7\n")
+  }
+
+  test("CRLF record separator") {
+    val out = encodeToString(
+      List(IdName(1, "alice"), IdName(2, "bob")),
+      opts = CsvParserOptions.rfc4180
+    )
+    assertEquals(out, "1,alice\r\n2,bob\r\n")
+  }
+
+  test("tab separated") {
+    val out = encodeToString(
+      List(IdName(1, "alice"), IdName(2, "bob")),
+      opts = CsvParserOptions.tabSeparated
+    )
+    assertEquals(out, "1\talice\n2\tbob\n")
+  }
+
+  test("@csvName renames the header") {
+    case class P(
+        @csvName("person_name") name: String,
+        @csvName("person_age")  age:  Int
+    ) derives RowWriter
+    val out = encodeToString(List(P("alice", 30)), withHeaders = true)
+    assertEquals(out, "person_name,person_age\nalice,30\n")
+  }
+
+  test("Naming.snakeCase transforms field names") {
+    case class P(personName: String, personAge: Int) derives RowWriter
+    val out = encodeToString(
+      List(P("alice", 30)),
+      withHeaders = true,
+      naming = Naming.snakeCase
+    )
+    assertEquals(out, "person_name,person_age\nalice,30\n")
+  }
+
+  test("@csvName wins over Naming transform") {
+    case class P(@csvName("EXACT_NAME") name: String, age: Int) derives RowWriter
+    val out = encodeToString(
+      List(P("alice", 30)),
+      withHeaders = true,
+      naming = Naming.snakeCase
+    )
+    assertEquals(out, "EXACT_NAME,age\nalice,30\n")
+  }
+
+  test("round trip decode → encode → decode") {
+    val input = "id,name\n1,alice\n2,bob\n3,\"carol, jr\"\n"
+    val decoded = Stream
+      .chunk(fs2.Chunk.array(input.getBytes("US-ASCII")))
+      .covary[IO]
+      .through(CsvPipes.decodeUsingHeaders[IO, IdName]())
+      .compile
+      .toList
+      .unsafeRunSync()
+
+    val encoded = encodeToString(decoded, withHeaders = true)
+
+    val redecoded = Stream
+      .chunk(fs2.Chunk.array(encoded.getBytes("US-ASCII")))
+      .covary[IO]
+      .through(CsvPipes.decodeUsingHeaders[IO, IdName]())
+      .compile
+      .toList
+      .unsafeRunSync()
+
+    assertEquals(redecoded, decoded)
+  }
+}
