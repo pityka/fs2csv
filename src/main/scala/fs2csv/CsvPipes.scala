@@ -337,9 +337,21 @@ private[fs2csv] final class RowAssemblingCallback[A](
 
   def errorMessage: Option[String] = Option(errMsg)
 
+  private def expectedRowWidth(): Int =
+    if (headerIndex == null) arity
+    else headerIndex.csvColumnToCaseClassField.length
+
+  private def shortRowMessage(): String =
+    s"line=${lineNumber + 1}: expected ${expectedRowWidth()} columns, got $currentCsvColumn"
+
   def flushPending(): Option[String] = {
     if (errMsg != null || consumerSaidStop || parsingHeaderRow || !rowInProgress)
       return Option(errMsg)
+    if (currentCsvColumn < expectedRowWidth()) {
+      val msg = shortRowMessage()
+      errMsg = msg
+      return Some(msg)
+    }
     try {
       val a = reader.build()
       reader.reset()
@@ -389,6 +401,11 @@ private[fs2csv] final class RowAssemblingCallback[A](
           currentCsvColumn += 1
           rowInProgress = true
           if (cellClosesRow) {
+            if (currentCsvColumn < expectedRowWidth()) {
+              val msg = shortRowMessage()
+              errMsg = msg
+              return saddle.Error(msg)
+            }
             val a = reader.build()
             reader.reset()
             currentCsvColumn = 0

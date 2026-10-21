@@ -55,6 +55,60 @@ class CsvSuite extends FunSuite {
     )
   }
 
+  test("empty cells (present but empty) decode normally for String and Option") {
+    case class Row(a: String, b: Option[Int], c: String) derives RowReader
+    val out = decodeStringSynchronously[Row]("x,,z\n")
+    assertEquals(out, List(Row("x", None, "z")))
+  }
+
+  test("missing columns in headerless row crash cleanly (not NPE)") {
+    case class Row(a: String, b: Option[Int], c: String) derives RowReader
+    val source = Stream
+      .chunk(fs2.Chunk.array("x\n".getBytes("US-ASCII")))
+      .covary[IO]
+    val outcome = source
+      .through(CsvPipes.decodeWithoutHeaders[IO, Row]())
+      .compile
+      .toList
+      .attempt
+      .unsafeRunSync()
+    assert(outcome.isLeft, s"expected an error, got $outcome")
+    val msg = outcome.left.toOption.get.getMessage
+    assert(msg.contains("expected 3") && msg.contains("got 1"), msg)
+  }
+
+  test("missing columns in trailing (no-newline) headerless row crash cleanly") {
+    case class Row(a: String, b: String, c: String) derives RowReader
+    val source = Stream
+      .chunk(fs2.Chunk.array("a,b,c\nx".getBytes("US-ASCII")))
+      .covary[IO]
+    val outcome = source
+      .through(CsvPipes.decodeWithoutHeaders[IO, Row]())
+      .compile
+      .toList
+      .attempt
+      .unsafeRunSync()
+    assert(outcome.isLeft, s"expected an error, got $outcome")
+    val msg = outcome.left.toOption.get.getMessage
+    assert(msg.contains("expected 3") && msg.contains("got 1"), msg)
+  }
+
+  test("missing columns in header-aware row crash cleanly (not NPE)") {
+    case class Row(name: String, age: Option[Int], note: Option[String]) derives RowReader
+    val source = Stream
+      .chunk(fs2.Chunk.array("name,age,note\nalice\n".getBytes("US-ASCII")))
+      .covary[IO]
+    val outcome = source
+      .through(CsvPipes.decodeUsingHeaders[IO, Row]())
+      .compile
+      .toList
+      .attempt
+      .unsafeRunSync()
+    assert(outcome.isLeft, s"expected an error, got $outcome")
+    val msg = outcome.left.toOption.get.getMessage
+    assert(msg.contains("expected 3") && msg.contains("got 1"), msg)
+  }
+
   test("header-aware: columns are reordered to match case-class fields") {
     case class Person(name: String, age: Int) derives RowReader
     val out = decodeStringSynchronously[Person]("age,name\n30,alice\n25,bob\n", withHeaders = true)
